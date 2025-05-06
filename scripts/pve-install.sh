@@ -63,6 +63,67 @@ get_system_inputs() {
     echo "IPv6 CIDR: $IPV6_CIDR"
     echo "IPv6: $MAIN_IPV6"
     
+    # Get list of available storage drives
+    echo -e "${CLR_YELLOW}Detecting available storage drives...${CLR_RESET}"
+    
+    # Get list of disk devices
+    AVAILABLE_DRIVES=$(lsblk -d -n -o NAME,SIZE,MODEL | grep -v "loop\|sr\|fd" | sort)
+    
+    if [ -z "$AVAILABLE_DRIVES" ]; then
+        echo -e "${CLR_RED}No suitable storage drives detected! Exiting.${CLR_RESET}"
+        exit 1
+    fi
+    
+    # Show available drives
+    echo -e "${CLR_YELLOW}Available storage drives:${CLR_RESET}"
+    lsblk -d -o NAME,SIZE,MODEL,SERIAL | grep -v "loop\|sr\|fd"
+    echo ""
+    
+    # Get first drive
+    local default_first_drive=$(echo "$AVAILABLE_DRIVES" | head -n1 | awk '{print $1}')
+    read -e -p "Select first drive for Proxmox installation: " -i "$default_first_drive" FIRST_DRIVE
+    
+    # Validate first drive exists
+    if [ ! -b "/dev/$FIRST_DRIVE" ]; then
+        echo -e "${CLR_RED}Drive /dev/$FIRST_DRIVE does not exist! Exiting.${CLR_RESET}"
+        exit 1
+    fi
+    
+    # Get second drive
+    local filtered_drives=$(echo "$AVAILABLE_DRIVES" | grep -v "^$FIRST_DRIVE ")
+    if [ -z "$filtered_drives" ]; then
+        echo -e "${CLR_RED}No additional drives available for RAID! Exiting.${CLR_RESET}"
+        exit 1
+    fi
+    
+    local default_second_drive=$(echo "$filtered_drives" | head -n1 | awk '{print $1}')
+    read -e -p "Select second drive for Proxmox installation: " -i "$default_second_drive" SECOND_DRIVE
+    
+    # Validate second drive exists
+    if [ ! -b "/dev/$SECOND_DRIVE" ]; then
+        echo -e "${CLR_RED}Drive /dev/$SECOND_DRIVE does not exist! Exiting.${CLR_RESET}"
+        exit 1
+    fi
+    
+    # Prompt for RAID level
+    echo -e "${CLR_YELLOW}RAID Configuration:${CLR_RESET}"
+    echo "RAID0: Stripes data across drives for maximum space and performance (no redundancy)"
+    echo "RAID1: Mirrors data across drives for redundancy (half the total space)"
+    read -e -p "Select RAID level (0 or 1): " -i "1" RAID_LEVEL
+    
+    # Validate RAID level
+    if [[ "$RAID_LEVEL" != "0" && "$RAID_LEVEL" != "1" ]]; then
+        echo -e "${CLR_RED}Invalid RAID level! Must be 0 or 1. Defaulting to RAID1.${CLR_RESET}"
+        RAID_LEVEL="1"
+    fi
+    
+    # Store full paths and RAID config
+    FIRST_DRIVE_PATH="/dev/$FIRST_DRIVE"
+    SECOND_DRIVE_PATH="/dev/$SECOND_DRIVE"
+    ZFS_RAID_TYPE="raid$RAID_LEVEL"
+    
+    echo -e "${CLR_GREEN}Selected drives: $FIRST_DRIVE_PATH and $SECOND_DRIVE_PATH with RAID$RAID_LEVEL${CLR_RESET}"
+    
     # Get user input for other configuration
     read -e -p "Enter your hostname : " -i "proxmox-example" HOSTNAME
     read -e -p "Enter your FQDN name : " -i "proxmox.example.com" FQDN
@@ -143,7 +204,7 @@ make_answer_toml() {
 
 [disk-setup]
     filesystem = "zfs"
-    zfs.raid = "raid1"
+    zfs.raid = "$ZFS_RAID_TYPE"
     disk_list = ["/dev/vda", "/dev/vdb"]
 
 EOF
@@ -179,8 +240,8 @@ install_proxmox() {
         -enable-kvm $UEFI_OPTS \
         -cpu host -smp 4 -m 4096 \
         -boot d -cdrom ./pve-autoinstall.iso \
-        -drive file=/dev/sda,format=raw,media=disk,if=virtio \
-        -drive file=/dev/sdb,format=raw,media=disk,if=virtio -no-reboot -display none > /dev/null 2>&1
+        -drive file=$FIRST_DRIVE_PATH,format=raw,media=disk,if=virtio \
+        -drive file=$SECOND_DRIVE_PATH,format=raw,media=disk,if=virtio -no-reboot -display none > /dev/null 2>&1
 }
 
 # Function to boot the installed Proxmox via QEMU with port forwarding
@@ -200,8 +261,8 @@ boot_proxmox_with_port_forwarding() {
         -cpu host -device e1000,netdev=net0 \
         -netdev user,id=net0,hostfwd=tcp::5555-:22 \
         -smp 4 -m 4096 \
-        -drive file=/dev/sda,format=raw,media=disk,if=virtio \
-        -drive file=/dev/sdb,format=raw,media=disk,if=virtio \
+        -drive file=$FIRST_DRIVE_PATH,format=raw,media=disk,if=virtio \
+        -drive file=$SECOND_DRIVE_PATH,format=raw,media=disk,if=virtio \
         > qemu_output.log 2>&1 &
     
     QEMU_PID=$!
