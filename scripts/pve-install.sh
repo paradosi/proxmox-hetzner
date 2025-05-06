@@ -1,33 +1,169 @@
-#!/usr/bin/bash
-set -e
-cd /root
+#!/usr/bin/env bash
+#=========================================================================
+# Proxmox VE Auto-Installation Script
+# Forked from https://github.com/ariadata/proxmox-hetzner :: many thanks
+# Version: 1.0.0
+# Author: paradosi
+# License: MIT
+#
+# Description:
+#   This script automates the installation of Proxmox VE on bare metal servers.
+#   It detects network interfaces, configures RAID, and sets up the system
+#   according to best practices.
+#=========================================================================
 
-# Define colors for output
-CLR_RED="\033[1;31m"
-CLR_GREEN="\033[1;32m"
-CLR_YELLOW="\033[1;33m"
-CLR_BLUE="\033[1;34m"
-CLR_RESET="\033[m"
+# Strict mode
+set -euo pipefail
+IFS=$'\n\t'
 
-clear
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}" || exit 1
 
-# Ensure the script is run as root
-if [[ $EUID != 0 ]]; then
-    echo -e "${CLR_RED}Please run this script as root.${CLR_RESET}"
-    exit 1
-fi
+# Log file
+LOG_FILE="/var/log/proxmox-installer.log"
+mkdir -p "$(dirname "${LOG_FILE}")"
+touch "${LOG_FILE}"
 
-echo -e "${CLR_GREEN}Starting Proxmox auto-installation...${CLR_RESET}"
+# Configuration directory
+CONFIG_DIR="${SCRIPT_DIR}/config"
+TEMPLATE_DIR="${SCRIPT_DIR}/templates"
+mkdir -p "${CONFIG_DIR}" "${TEMPLATE_DIR}"
 
-# Function to get user input
+#=========================================================================
+# Color definitions
+#=========================================================================
+readonly C_RESET="\033[0m"
+readonly C_RED="\033[1;31m"
+readonly C_GREEN="\033[1;32m"
+readonly C_YELLOW="\033[1;33m"
+readonly C_BLUE="\033[1;34m"
+readonly C_PURPLE="\033[1;35m"
+readonly C_CYAN="\033[1;36m"
+readonly C_WHITE="\033[1;37m"
+
+#=========================================================================
+# Configuration Variables - Will be populated during script execution
+#=========================================================================
+INTERFACE_NAME=""
+MAIN_IPV4_CIDR=""
+MAIN_IPV4=""
+MAIN_IPV4_GW=""
+MAC_ADDRESS=""
+IPV6_CIDR=""
+MAIN_IPV6=""
+FIRST_IPV6_CIDR=""
+
+FIRST_DRIVE=""
+SECOND_DRIVE=""
+FIRST_DRIVE_PATH=""
+SECOND_DRIVE_PATH=""
+RAID_LEVEL=""
+ZFS_RAID_TYPE=""
+
+HOSTNAME=""
+FQDN=""
+TIMEZONE=""
+EMAIL=""
+PRIVATE_SUBNET=""
+PRIVATE_IP=""
+PRIVATE_IP_CIDR=""
+NEW_ROOT_PASSWORD=""
+
+QEMU_PID=""
+PROXMOX_ISO_URL=""
+
+#=========================================================================
+# Logger Functions
+#=========================================================================
+log() {
+    local timestamp
+    timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    echo -e "[${timestamp}] $*" | tee -a "${LOG_FILE}"
+}
+
+log_info() {
+    log "${C_BLUE}[INFO]${C_RESET} $*"
+}
+
+log_success() {
+    log "${C_GREEN}[SUCCESS]${C_RESET} $*"
+}
+
+log_warning() {
+    log "${C_YELLOW}[WARNING]${C_RESET} $*"
+}
+
+log_error() {
+    log "${C_RED}[ERROR]${C_RESET} $*"
+}
+
+log_section() {
+    log "\n${C_PURPLE}=== $* ===${C_RESET}"
+}
+
+#=========================================================================
+# Utility Functions
+#=========================================================================
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        log_error "This script must be run as root"
+        exit 1
+    fi
+}
+
+confirm_proceed() {
+    local message="$1"
+    local default="${2:-y}"
+    
+    local prompt
+    if [[ "${default}" == "y" ]]; then
+        prompt="[Y/n]"
+    else
+        prompt="[y/N]"
+    fi
+    
+    read -r -p "${message} ${prompt} " response
+    response="${response:-${default}}"
+    
+    if [[ "${response,,}" =~ ^(yes|y)$ ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+show_banner() {
+    clear
+    cat << "EOF"
+ ____                                 __   _______ 
+|  _ \ _ __ _____  ___ __ ___   ___ __ \ \ / / ____|
+| |_) | '__/ _ \ \/ / '_ ` _ \ / _ \_  / \ V /|  _|  
+|  __/| | | (_) >  <| | | | | | (_) / /   | | | |___ 
+|_|   |_|  \___/_/\_\_| |_| |_|\___/___/  |_| |_____|
+                                                   
+ Auto-Installation Script                  
+EOF
+    echo -e "${C_BLUE}Version 1.0.0${C_RESET}\n"
+    echo -e "${C_YELLOW}This script will automate the installation of Proxmox VE.${C_RESET}"
+    echo -e "${C_YELLOW}It will detect your network, configure storage, and set up the system.${C_RESET}\n"
+}
+
+#=========================================================================
+# Detection and Input Functions
+#=========================================================================
 get_system_inputs() {
-    # Get default interface name and available alternative names first
+    log_section "System Configuration"
+    
+    # Get default interface name and available alternative names
+    local DEFAULT_INTERFACE
     DEFAULT_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
     if [ -z "$DEFAULT_INTERFACE" ]; then
         DEFAULT_INTERFACE=$(udevadm info -e | grep -m1 -A 20 ^P.*eth0 | grep ID_NET_NAME_PATH | cut -d'=' -f2)
     fi
     
     # Get all available interfaces and their altnames
+    local AVAILABLE_ALTNAMES
     AVAILABLE_ALTNAMES=$(ip -d link show | grep -v "lo:" | grep -E '(^[0-9]+:|altname)' | awk '/^[0-9]+:/ {interface=$2; gsub(/:/, "", interface); printf "%s", interface} /altname/ {printf ", %s", $2} END {print ""}' | sed 's/, $//')
     
     # Set INTERFACE_NAME to default if not already set
@@ -35,8 +171,8 @@ get_system_inputs() {
         INTERFACE_NAME="$DEFAULT_INTERFACE"
     fi
     
-    # Prompt user for interface name
-    read -e -p "Interface name (options are: ${AVAILABLE_ALTNAMES}) : " -i "$INTERFACE_NAME" INTERFACE_NAME
+    log_info "Available network interfaces: ${AVAILABLE_ALTNAMES}"
+    read -e -p "Interface name: " -i "$INTERFACE_NAME" INTERFACE_NAME
     
     # Now get network information based on the selected interface
     MAIN_IPV4_CIDR=$(ip address show "$INTERFACE_NAME" | grep global | grep "inet " | xargs | cut -d" " -f2)
@@ -54,66 +190,70 @@ get_system_inputs() {
     fi
     
     # Display detected information
-    echo -e "${CLR_YELLOW}Detected Network Information:${CLR_RESET}"
-    echo "Interface Name: $INTERFACE_NAME"
-    echo "Main IPv4 CIDR: $MAIN_IPV4_CIDR"
-    echo "Main IPv4: $MAIN_IPV4"
-    echo "Main IPv4 Gateway: $MAIN_IPV4_GW"
-    echo "MAC Address: $MAC_ADDRESS"
-    echo "IPv6 CIDR: $IPV6_CIDR"
-    echo "IPv6: $MAIN_IPV6"
+    log_info "Network Information:"
+    echo "  Interface Name    : $INTERFACE_NAME"
+    echo "  IPv4 CIDR         : $MAIN_IPV4_CIDR"
+    echo "  IPv4 Address      : $MAIN_IPV4"
+    echo "  IPv4 Gateway      : $MAIN_IPV4_GW"
+    echo "  MAC Address       : $MAC_ADDRESS"
+    echo "  IPv6 CIDR         : $IPV6_CIDR"
+    echo "  IPv6 Address      : $MAIN_IPV6"
     
-    # Get list of available storage drives
-    echo -e "${CLR_YELLOW}Detecting available storage drives...${CLR_RESET}"
+    # Configure storage
+    log_section "Storage Configuration"
     
     # Get list of disk devices
+    local AVAILABLE_DRIVES
     AVAILABLE_DRIVES=$(lsblk -d -n -o NAME,SIZE,MODEL | grep -v "loop\|sr\|fd" | sort)
     
     if [ -z "$AVAILABLE_DRIVES" ]; then
-        echo -e "${CLR_RED}No suitable storage drives detected! Exiting.${CLR_RESET}"
+        log_error "No suitable storage drives detected! Exiting."
         exit 1
     fi
     
     # Show available drives
-    echo -e "${CLR_YELLOW}Available storage drives:${CLR_RESET}"
+    log_info "Available storage drives:"
     lsblk -d -o NAME,SIZE,MODEL,SERIAL | grep -v "loop\|sr\|fd"
     echo ""
     
     # Get first drive
-    local default_first_drive=$(echo "$AVAILABLE_DRIVES" | head -n1 | awk '{print $1}')
+    local default_first_drive
+    default_first_drive=$(echo "$AVAILABLE_DRIVES" | head -n1 | awk '{print $1}')
     read -e -p "Select first drive for Proxmox installation: " -i "$default_first_drive" FIRST_DRIVE
     
     # Validate first drive exists
     if [ ! -b "/dev/$FIRST_DRIVE" ]; then
-        echo -e "${CLR_RED}Drive /dev/$FIRST_DRIVE does not exist! Exiting.${CLR_RESET}"
+        log_error "Drive /dev/$FIRST_DRIVE does not exist! Exiting."
         exit 1
     fi
     
     # Get second drive
-    local filtered_drives=$(echo "$AVAILABLE_DRIVES" | grep -v "^$FIRST_DRIVE ")
+    local filtered_drives
+    filtered_drives=$(echo "$AVAILABLE_DRIVES" | grep -v "^$FIRST_DRIVE ")
     if [ -z "$filtered_drives" ]; then
-        echo -e "${CLR_RED}No additional drives available for RAID! Exiting.${CLR_RESET}"
+        log_error "No additional drives available for RAID! Exiting."
         exit 1
     fi
     
-    local default_second_drive=$(echo "$filtered_drives" | head -n1 | awk '{print $1}')
+    local default_second_drive
+    default_second_drive=$(echo "$filtered_drives" | head -n1 | awk '{print $1}')
     read -e -p "Select second drive for Proxmox installation: " -i "$default_second_drive" SECOND_DRIVE
     
     # Validate second drive exists
     if [ ! -b "/dev/$SECOND_DRIVE" ]; then
-        echo -e "${CLR_RED}Drive /dev/$SECOND_DRIVE does not exist! Exiting.${CLR_RESET}"
+        log_error "Drive /dev/$SECOND_DRIVE does not exist! Exiting."
         exit 1
     fi
     
     # Prompt for RAID level
-    echo -e "${CLR_YELLOW}RAID Configuration:${CLR_RESET}"
-    echo "RAID0: Stripes data across drives for maximum space and performance (no redundancy)"
-    echo "RAID1: Mirrors data across drives for redundancy (half the total space)"
+    echo -e "\n${C_YELLOW}RAID Configuration:${C_RESET}"
+    echo "  RAID0: Stripes data across drives for maximum space and performance (no redundancy)"
+    echo "  RAID1: Mirrors data across drives for redundancy (half the total space)"
     read -e -p "Select RAID level (0 or 1): " -i "1" RAID_LEVEL
     
     # Validate RAID level
     if [[ "$RAID_LEVEL" != "0" && "$RAID_LEVEL" != "1" ]]; then
-        echo -e "${CLR_RED}Invalid RAID level! Must be 0 or 1. Defaulting to RAID1.${CLR_RESET}"
+        log_warning "Invalid RAID level! Must be 0 or 1. Defaulting to RAID1."
         RAID_LEVEL="1"
     fi
     
@@ -122,74 +262,143 @@ get_system_inputs() {
     SECOND_DRIVE_PATH="/dev/$SECOND_DRIVE"
     ZFS_RAID_TYPE="raid$RAID_LEVEL"
     
-    echo -e "${CLR_GREEN}Selected drives: $FIRST_DRIVE_PATH and $SECOND_DRIVE_PATH with RAID$RAID_LEVEL${CLR_RESET}"
+    log_success "Selected drives: $FIRST_DRIVE_PATH and $SECOND_DRIVE_PATH with RAID$RAID_LEVEL"
+    
+    # System configuration
+    log_section "System Settings"
     
     # Get user input for other configuration
-    read -e -p "Enter your hostname : " -i "proxmox-example" HOSTNAME
-    read -e -p "Enter your FQDN name : " -i "proxmox.example.com" FQDN
-    read -e -p "Enter your timezone : " -i "Europe/Istanbul" TIMEZONE
-    read -e -p "Enter your email address: " -i "admin@example.com" EMAIL
-    read -e -p "Enter your private subnet : " -i "192.168.26.0/24" PRIVATE_SUBNET
-    read -e -p "Enter your System New root password: " NEW_ROOT_PASSWORD
+    read -e -p "Hostname: " -i "proxmox-server" HOSTNAME
+    read -e -p "FQDN: " -i "$HOSTNAME.example.com" FQDN
+    read -e -p "Timezone: " -i "UTC" TIMEZONE
+    read -e -p "Admin email: " -i "admin@example.com" EMAIL
+    read -e -p "Private subnet: " -i "10.10.10.0/24" PRIVATE_SUBNET
+    
+    # Password input with masking and confirmation
+    while true; do
+        read -s -p "Root password: " NEW_ROOT_PASSWORD
+        echo
+        if [[ -z "$NEW_ROOT_PASSWORD" ]]; then
+            log_error "Password cannot be empty. Please try again."
+            continue
+        fi
+        
+        read -s -p "Confirm password: " PASSWORD_CONFIRM
+        echo
+        
+        if [[ "$NEW_ROOT_PASSWORD" == "$PASSWORD_CONFIRM" ]]; then
+            break
+        else
+            log_error "Passwords do not match. Please try again."
+        fi
+    done
     
     # Get the network prefix (first three octets) from PRIVATE_SUBNET
+    local PRIVATE_CIDR
     PRIVATE_CIDR=$(echo "$PRIVATE_SUBNET" | cut -d'/' -f1 | rev | cut -d'.' -f2- | rev)
     # Append .1 to get the first IP in the subnet
     PRIVATE_IP="${PRIVATE_CIDR}.1"
     # Get the subnet mask length
+    local SUBNET_MASK
     SUBNET_MASK=$(echo "$PRIVATE_SUBNET" | cut -d'/' -f2)
     # Create the full CIDR notation for the first IP
     PRIVATE_IP_CIDR="${PRIVATE_IP}/${SUBNET_MASK}"
     
-    # Check password was not empty, do it in loop until password is not empty
-    while [[ -z "$NEW_ROOT_PASSWORD" ]]; do
-        # Print message in a new line
-        echo ""
-        read -e -p "Enter your System New root password: " NEW_ROOT_PASSWORD
-    done
-
-    echo ""
-    echo "Private subnet: $PRIVATE_SUBNET"
-    echo "First IP in subnet (CIDR): $PRIVATE_IP_CIDR"
-}
-
-
-prepare_packages() {
-    echo -e "${CLR_BLUE}Installing packages...${CLR_RESET}"
-    echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" | tee /etc/apt/sources.list.d/pve.list
-    curl -o /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg
-    apt clean && apt update && apt install -yq proxmox-auto-install-assistant xorriso ovmf wget sshpass
-
-    echo -e "${CLR_GREEN}Packages installed.${CLR_RESET}"
-}
-
-# Fetch latest Proxmox VE ISO
-get_latest_proxmox_ve_iso() {
-    local base_url="https://enterprise.proxmox.com/iso/"
-    local latest_iso=$(curl -s "$base_url" | grep -oP 'proxmox-ve_[0-9]+\.[0-9]+-[0-9]+\.iso' | sort -V | tail -n1)
-
-    if [[ -n "$latest_iso" ]]; then
-        echo "${base_url}${latest_iso}"
-    else
-        echo "No Proxmox VE ISO found." >&2
-        return 1
+    log_info "Private network configuration:"
+    echo "  Subnet: $PRIVATE_SUBNET"
+    echo "  First IP (CIDR): $PRIVATE_IP_CIDR"
+    
+    # Save configuration to file for reference
+    {
+        echo "# Proxmox Installation Configuration"
+        echo "# Generated on: $(date)"
+        echo "HOSTNAME=$HOSTNAME"
+        echo "FQDN=$FQDN"
+        echo "INTERFACE_NAME=$INTERFACE_NAME"
+        echo "MAIN_IPV4=$MAIN_IPV4"
+        echo "MAIN_IPV4_CIDR=$MAIN_IPV4_CIDR"
+        echo "MAIN_IPV4_GW=$MAIN_IPV4_GW"
+        echo "PRIVATE_SUBNET=$PRIVATE_SUBNET"
+        echo "PRIVATE_IP_CIDR=$PRIVATE_IP_CIDR"
+        echo "FIRST_DRIVE=$FIRST_DRIVE"
+        echo "SECOND_DRIVE=$SECOND_DRIVE"
+        echo "RAID_LEVEL=$RAID_LEVEL"
+    } > "${CONFIG_DIR}/installation.conf"
+    
+    log_success "Configuration saved to ${CONFIG_DIR}/installation.conf"
+    
+    # Confirm installation
+    echo
+    if ! confirm_proceed "Ready to proceed with installation?"; then
+        log_info "Installation aborted by user"
+        exit 0
     fi
+}
+
+#=========================================================================
+# Installation Functions
+#=========================================================================
+prepare_packages() {
+    log_section "Installing Required Packages"
+    
+    log_info "Adding Proxmox repository..."
+    echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" | tee /etc/apt/sources.list.d/pve.list
+    
+    log_info "Fetching Proxmox GPG key..."
+    curl -fsSL -o /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg
+    
+    log_info "Updating package lists and installing required packages..."
+    apt-get clean && apt-get update
+    apt-get install -y --no-install-recommends \
+        proxmox-auto-install-assistant \
+        xorriso \
+        ovmf \
+        wget \
+        sshpass \
+        ca-certificates \
+        curl \
+        lsb-release \
+        gnupg2
+    
+    log_success "Required packages installed"
 }
 
 download_proxmox_iso() {
-    echo -e "${CLR_BLUE}Downloading Proxmox ISO...${CLR_RESET}"
-    PROXMOX_ISO_URL=$(get_latest_proxmox_ve_iso)
-    if [[ -z "$PROXMOX_ISO_URL" ]]; then
-        echo -e "${CLR_RED}Failed to retrieve Proxmox ISO URL! Exiting.${CLR_RESET}"
+    log_section "Downloading Proxmox VE ISO"
+    
+    local base_url="https://enterprise.proxmox.com/iso/"
+    log_info "Detecting latest Proxmox VE ISO..."
+    
+    local latest_iso
+    latest_iso=$(curl -s "$base_url" | grep -oP 'proxmox-ve_[0-9]+\.[0-9]+-[0-9]+\.iso' | sort -V | tail -n1)
+    
+    if [[ -z "$latest_iso" ]]; then
+        log_error "Failed to detect latest Proxmox VE ISO. Exiting."
         exit 1
     fi
-    wget -O pve.iso "$PROXMOX_ISO_URL"
-    echo -e "${CLR_GREEN}Proxmox ISO downloaded.${CLR_RESET}"
+    
+    PROXMOX_ISO_URL="${base_url}${latest_iso}"
+    log_info "Latest Proxmox VE ISO: ${latest_iso}"
+    log_info "Downloading from: ${PROXMOX_ISO_URL}"
+    
+    wget --progress=bar:force -O pve.iso "$PROXMOX_ISO_URL"
+    
+    if [[ ! -f "pve.iso" ]]; then
+        log_error "Failed to download Proxmox ISO. Exiting."
+        exit 1
+    fi
+    
+    log_success "Proxmox VE ISO downloaded successfully"
 }
 
 make_answer_toml() {
-    echo -e "${CLR_BLUE}Making answer.toml...${CLR_RESET}"
+    log_section "Creating Autoinstallation Configuration"
+    
+    log_info "Generating answer.toml for unattended installation..."
     cat <<EOF > answer.toml
+# Proxmox VE Autoinstall Configuration
+# Generated on: $(date)
+
 [global]
     keyboard = "en-us"
     country = "us"
@@ -208,54 +417,87 @@ make_answer_toml() {
     disk_list = ["/dev/vda", "/dev/vdb"]
 
 EOF
-    echo -e "${CLR_GREEN}answer.toml created.${CLR_RESET}"
+    log_success "answer.toml created successfully"
 }
 
 make_autoinstall_iso() {
-    echo -e "${CLR_BLUE}Making autoinstall.iso...${CLR_RESET}"
-    proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from iso --answer-file answer.toml --output pve-autoinstall.iso
-    echo -e "${CLR_GREEN}pve-autoinstall.iso created.${CLR_RESET}"
+    log_section "Creating Autoinstallation ISO"
+    
+    log_info "Preparing autoinstallation ISO..."
+    proxmox-auto-install-assistant prepare-iso pve.iso \
+        --fetch-from iso \
+        --answer-file answer.toml \
+        --output pve-autoinstall.iso
+    
+    if [[ ! -f "pve-autoinstall.iso" ]]; then
+        log_error "Failed to create autoinstallation ISO. Exiting."
+        exit 1
+    }
+    
+    log_success "Autoinstallation ISO created successfully: pve-autoinstall.iso"
 }
 
 is_uefi_mode() {
-  [ -d /sys/firmware/efi ]
+    [ -d /sys/firmware/efi ]
 }
 
-# Install Proxmox via QEMU/VNC
 install_proxmox() {
-    echo -e "${CLR_GREEN}Starting Proxmox VE installation...${CLR_RESET}"
-
+    log_section "Starting Proxmox VE Installation"
+    
+    local UEFI_OPTS=""
     if is_uefi_mode; then
         UEFI_OPTS="-bios /usr/share/ovmf/OVMF.fd"
-        echo -e "UEFI Supported! Booting with UEFI firmware."
+        log_info "UEFI mode detected, booting with UEFI firmware"
     else
-        UEFI_OPTS=""
-        echo -e "UEFI Not Supported! Booting in legacy mode."
+        log_info "UEFI not detected, booting in legacy mode"
     fi
-    echo -e "${CLR_YELLOW}Installing Proxmox VE${CLR_RESET}"
-	echo -e "${CLR_YELLOW}=================================${CLR_RESET}"
-    echo -e "${CLR_RED}Do NOT do anything, just wait about 5-10 min!${CLR_RED}"
-	echo -e "${CLR_YELLOW}=================================${CLR_RESET}"
+    
+    log_warning "The installation process will take 5-10 minutes"
+    log_warning "Do NOT interact with the system during installation"
+    
+    log_info "Starting QEMU for installation..."
+    
+    # Create progress indicator function
+    (
+        i=0
+        while :; do
+            i=$((i+1))
+            echo -ne "\r${C_BLUE}Installation in progress [${i}s]${C_RESET}"
+            sleep 1
+        done
+    ) &
+    PROGRESS_PID=$!
+    
+    # Run QEMU silently
     qemu-system-x86_64 \
         -enable-kvm $UEFI_OPTS \
         -cpu host -smp 4 -m 4096 \
         -boot d -cdrom ./pve-autoinstall.iso \
         -drive file=$FIRST_DRIVE_PATH,format=raw,media=disk,if=virtio \
-        -drive file=$SECOND_DRIVE_PATH,format=raw,media=disk,if=virtio -no-reboot -display none > /dev/null 2>&1
+        -drive file=$SECOND_DRIVE_PATH,format=raw,media=disk,if=virtio \
+        -no-reboot -display none > /dev/null 2>&1
+    
+    # Kill progress indicator
+    kill $PROGRESS_PID 2>/dev/null || true
+    wait $PROGRESS_PID 2>/dev/null || true
+    echo -e "\r${C_GREEN}Installation phase completed${C_RESET}            "
+    
+    log_success "Proxmox VE base installation completed"
 }
 
-# Function to boot the installed Proxmox via QEMU with port forwarding
 boot_proxmox_with_port_forwarding() {
-    echo -e "${CLR_GREEN}Booting installed Proxmox with SSH port forwarding...${CLR_RESET}"
-
+    log_section "Post-Installation Configuration"
+    
+    log_info "Booting installed Proxmox VE with SSH port forwarding"
+    
+    local UEFI_OPTS=""
     if is_uefi_mode; then
         UEFI_OPTS="-bios /usr/share/ovmf/OVMF.fd"
-        echo -e "${CLR_YELLOW}UEFI Supported! Booting with UEFI firmware.${CLR_RESET}"
+        log_info "UEFI mode detected, booting with UEFI firmware"
     else
-        UEFI_OPTS=""
-        echo -e "${CLR_YELLOW}UEFI Not Supported! Booting in legacy mode.${CLR_RESET}"
+        log_info "UEFI not detected, booting in legacy mode"
     fi
-    # UEFI_OPTS=""
+    
     # Start QEMU in background with port forwarding
     nohup qemu-system-x86_64 -enable-kvm $UEFI_OPTS \
         -cpu host -device e1000,netdev=net0 \
@@ -266,46 +508,54 @@ boot_proxmox_with_port_forwarding() {
         > qemu_output.log 2>&1 &
     
     QEMU_PID=$!
-    echo -e "${CLR_YELLOW}QEMU started with PID: $QEMU_PID${CLR_RESET}"
+    log_info "QEMU started with PID: $QEMU_PID"
     
     # Wait for SSH to become available on port 5555
-    echo -e "${CLR_YELLOW}Waiting for SSH to become available on port 5555...${CLR_RESET}"
+    log_info "Waiting for SSH to become available..."
+    echo -n "  "
+    
+    local ssh_available=false
     for i in {1..60}; do
         if nc -z localhost 5555; then
-            echo -e "${CLR_GREEN}SSH is available on port 5555.${CLR_RESET}"
+            ssh_available=true
+            echo -e "\n${C_GREEN}SSH is available on port 5555${C_RESET}"
             break
         fi
         echo -n "."
         sleep 5
-        if [ $i -eq 60 ]; then
-            echo -e "${CLR_RED}SSH is not available after 5 minutes. Check the system manually.${CLR_RESET}"
-            return 1
-        fi
     done
+    
+    if ! $ssh_available; then
+        log_error "SSH did not become available after 5 minutes. Check the system manually."
+        return 1
+    fi
+    
+    # Give the system a few more seconds to fully boot
+    sleep 10
     
     return 0
 }
 
 make_template_files() {
-    echo -e "${CLR_BLUE}Modifying template files...${CLR_RESET}"
+    log_section "Preparing Configuration Templates"
     
-    echo -e "${CLR_YELLOW}Downloading template files...${CLR_RESET}"
+    log_info "Downloading template files..."
     mkdir -p ./template_files
 
-    wget -O ./template_files/99-proxmox.conf https://github.com/ariadata/proxmox-hetzner/raw/refs/heads/main/files/template_files/99-proxmox.conf
-    wget -O ./template_files/hosts https://github.com/ariadata/proxmox-hetzner/raw/refs/heads/main/files/template_files/hosts
-    wget -O ./template_files/interfaces https://github.com/ariadata/proxmox-hetzner/raw/refs/heads/main/files/template_files/interfaces
-    wget -O ./template_files/sources.list https://github.com/ariadata/proxmox-hetzner/raw/refs/heads/main/files/template_files/sources.list
+    wget -q -O ./template_files/99-proxmox.conf https://github.com/paradosi/proxmox-hetzner/raw/refs/heads/main/files/template_files/99-proxmox.conf
+    wget -q -O ./template_files/hosts https://github.com/paradosi/proxmox-hetzner/raw/refs/heads/main/files/template_files/hosts
+    wget -q -O ./template_files/interfaces https://github.com/paradosi/proxmox-hetzner/raw/refs/heads/main/files/template_files/interfaces
+    wget -q -O ./template_files/sources.list https://github.com/paradosi/proxmox-hetzner/raw/refs/heads/main/files/template_files/sources.list
 
     # Process hosts file
-    echo -e "${CLR_YELLOW}Processing hosts file...${CLR_RESET}"
+    log_info "Processing hosts file..."
     sed -i "s|{{MAIN_IPV4}}|$MAIN_IPV4|g" ./template_files/hosts
     sed -i "s|{{FQDN}}|$FQDN|g" ./template_files/hosts
     sed -i "s|{{HOSTNAME}}|$HOSTNAME|g" ./template_files/hosts
     sed -i "s|{{MAIN_IPV6}}|$MAIN_IPV6|g" ./template_files/hosts
 
     # Process interfaces file
-    echo -e "${CLR_YELLOW}Processing interfaces file...${CLR_RESET}"
+    log_info "Processing interfaces file..."
     sed -i "s|{{INTERFACE_NAME}}|$INTERFACE_NAME|g" ./template_files/interfaces
     sed -i "s|{{MAIN_IPV4_CIDR}}|$MAIN_IPV4_CIDR|g" ./template_files/interfaces
     sed -i "s|{{MAIN_IPV4_GW}}|$MAIN_IPV4_GW|g" ./template_files/interfaces
@@ -315,72 +565,142 @@ make_template_files() {
     sed -i "s|{{PRIVATE_SUBNET}}|$PRIVATE_SUBNET|g" ./template_files/interfaces
     sed -i "s|{{FIRST_IPV6_CIDR}}|$FIRST_IPV6_CIDR|g" ./template_files/interfaces
 
-    echo -e "${CLR_GREEN}Template files modified successfully.${CLR_RESET}"
+    log_success "Template files processed successfully"
 }
 
-# Function to configure the installed Proxmox via SSH
 configure_proxmox_via_ssh() {
-    echo -e "${CLR_BLUE}Starting post-installation configuration via SSH...${CLR_RESET}"
-    make_template_files
-	ssh-keygen -f "/root/.ssh/known_hosts" -R "[localhost]:5555" || true
-    # copy template files to the server using scp
-    sshpass -p "$NEW_ROOT_PASSWORD" scp -P 5555 -o StrictHostKeyChecking=no template_files/hosts root@localhost:/etc/hosts
-    sshpass -p "$NEW_ROOT_PASSWORD" scp -P 5555 -o StrictHostKeyChecking=no template_files/interfaces root@localhost:/etc/network/interfaces
-    sshpass -p "$NEW_ROOT_PASSWORD" scp -P 5555 -o StrictHostKeyChecking=no template_files/99-proxmox.conf root@localhost:/etc/sysctl.d/99-proxmox.conf
-    sshpass -p "$NEW_ROOT_PASSWORD" scp -P 5555 -o StrictHostKeyChecking=no template_files/sources.list root@localhost:/etc/apt/sources.list
+    log_section "Configuring Proxmox VE"
     
-    # comment out the line in the sources.list file
-    sshpass -p "$NEW_ROOT_PASSWORD" ssh -p 5555 -o StrictHostKeyChecking=no root@localhost "sed -i 's/^\([^#].*\)/# \1/g' /etc/apt/sources.list.d/pve-enterprise.list"
-    sshpass -p "$NEW_ROOT_PASSWORD" ssh -p 5555 -o StrictHostKeyChecking=no root@localhost "sed -i 's/^\([^#].*\)/# \1/g' /etc/apt/sources.list.d/ceph.list"
-    sshpass -p "$NEW_ROOT_PASSWORD" ssh -p 5555 -o StrictHostKeyChecking=no root@localhost "echo -e 'nameserver 8.8.8.8\nnameserver 1.1.1.1\nnameserver 4.2.2.4\nnameserver 9.9.9.9' | tee /etc/resolv.conf"
-    sshpass -p "$NEW_ROOT_PASSWORD" ssh -p 5555 -o StrictHostKeyChecking=no root@localhost "echo $HOSTNAME > /etc/hostname"
-    sshpass -p "$NEW_ROOT_PASSWORD" ssh -p 5555 -o StrictHostKeyChecking=no root@localhost "systemctl disable --now rpcbind rpcbind.socket"
+    log_info "Preparing configuration files..."
+    make_template_files
+    
+    # Clean up any old SSH known hosts entries
+    ssh-keygen -f "/root/.ssh/known_hosts" -R "[localhost]:5555" 2>/dev/null || true
+    
+    # Function to execute SSH commands with proper error handling
+    ssh_exec() {
+        local cmd="$1"
+        local desc="${2:-Executing command}"
+        
+        log_info "$desc..."
+        if ! sshpass -p "$NEW_ROOT_PASSWORD" ssh -p 5555 -o StrictHostKeyChecking=no root@localhost "$cmd"; then
+            log_error "Failed to execute: $cmd"
+            return 1
+        fi
+        return 0
+    }
+    
+    # Function to copy files via SCP with proper error handling
+    scp_copy() {
+        local src="$1"
+        local dest="$2"
+        local desc="${3:-Copying file}"
+        
+        log_info "$desc: $src -> $dest"
+        if ! sshpass -p "$NEW_ROOT_PASSWORD" scp -P 5555 -o StrictHostKeyChecking=no "$src" "root@localhost:$dest"; then
+            log_error "Failed to copy: $src -> $dest"
+            return 1
+        fi
+        return 0
+    }
+    
+    # Copy configuration files
+    scp_copy "template_files/hosts" "/etc/hosts" "Setting up hosts file"
+    scp_copy "template_files/interfaces" "/etc/network/interfaces" "Setting up network interfaces"
+    scp_copy "template_files/99-proxmox.conf" "/etc/sysctl.d/99-proxmox.conf" "Setting up sysctl configuration"
+    scp_copy "template_files/sources.list" "/etc/apt/sources.list" "Setting up package sources"
+    
+    # Disable enterprise repositories
+    ssh_exec "sed -i 's/^\([^#].*\)/# \1/g' /etc/apt/sources.list.d/pve-enterprise.list" "Disabling PVE Enterprise repository"
+    ssh_exec "sed -i 's/^\([^#].*\)/# \1/g' /etc/apt/sources.list.d/ceph.list" "Disabling Ceph Enterprise repository"
+    
+    # Set up DNS resolvers
+    ssh_exec "echo -e 'nameserver 8.8.8.8\nnameserver 1.1.1.1\nnameserver 4.2.2.4\nnameserver 9.9.9.9' | tee /etc/resolv.conf" "Setting up DNS resolvers"
+    
+    # Set hostname
+    ssh_exec "echo $HOSTNAME > /etc/hostname" "Setting hostname"
+    
+    # Disable unnecessary services
+    ssh_exec "systemctl disable --now rpcbind rpcbind.socket" "Disabling rpcbind service"
+    
     # Power off the VM
-    echo -e "${CLR_YELLOW}Powering off the VM...${CLR_RESET}"
+    log_info "Configuration complete, powering off VM..."
     sshpass -p "$NEW_ROOT_PASSWORD" ssh -p 5555 -o StrictHostKeyChecking=no root@localhost 'poweroff' || true
     
     # Wait for QEMU to exit
-    echo -e "${CLR_YELLOW}Waiting for QEMU process to exit...${CLR_RESET}"
-    wait $QEMU_PID || true
-    echo -e "${CLR_GREEN}QEMU process has exited.${CLR_RESET}"
+    log_info "Waiting for QEMU process to exit..."
+    wait $QEMU_PID 2>/dev/null || true
+    
+    log_success "Post-installation configuration completed"
 }
 
-# Function to reboot into the main OS
-reboot_to_main_os() {
-    echo -e "${CLR_GREEN}Installation complete!${CLR_RESET}"
-    echo -e "${CLR_YELLOW}After rebooting, you will be able to access your Proxmox at https://${MAIN_IPV4_CIDR%/*}:8006${CLR_RESET}"
+finalize_installation() {
+    log_section "Installation Complete"
     
-    #ask user to reboot the system
-    read -e -p "Do you want to reboot the system? (y/n): " -i "y" REBOOT
-    if [[ "$REBOOT" == "y" ]]; then
-        echo -e "${CLR_YELLOW}Rebooting the system...${CLR_RESET}"
+    # Display installation summary
+    cat << EOF
+
+${C_GREEN}Proxmox VE has been successfully installed!${C_RESET}
+
+${C_YELLOW}Installation Summary:${C_RESET}
+  Hostname         : $HOSTNAME
+  FQDN             : $FQDN
+  IPv4 Address     : $MAIN_IPV4
+  Management URL   : https://${MAIN_IPV4}:8006
+  Storage Config   : RAID${RAID_LEVEL} with ${FIRST_DRIVE} and ${SECOND_DRIVE}
+  Private Network  : $PRIVATE_SUBNET
+
+${C_YELLOW}Next Steps:${C_RESET}
+  1. Reboot your server to boot into Proxmox VE
+  2. Access the web interface at https://${MAIN_IPV4}:8006
+  3. Log in with:
+     - Username: root
+     - Password: (the one you provided during installation)
+
+${C_YELLOW}Log file:${C_RESET} ${LOG_FILE}
+${C_YELLOW}Config backup:${C_RESET} ${CONFIG_DIR}/installation.conf
+
+EOF
+    
+    # Ask if user wants to reboot
+    if confirm_proceed "Would you like to reboot the system now?"; then
+        log_info "Rebooting the system..."
         reboot
     else
-        echo -e "${CLR_YELLOW}Exiting...${CLR_RESET}"
-        exit 0
+        log_info "Reboot skipped. You can reboot manually when ready."
     fi
 }
 
-
-
-# Main execution flow
-get_system_inputs
-prepare_packages
-download_proxmox_iso
-make_answer_toml
-make_autoinstall_iso
-install_proxmox
-
-echo -e "${CLR_YELLOW}Waiting for installation to complete...${CLR_RESET}"
-
-# Boot the installed Proxmox with port forwarding
-boot_proxmox_with_port_forwarding || {
-    echo -e "${CLR_RED}Failed to boot Proxmox with port forwarding. Exiting.${CLR_RESET}"
-    exit 1
+#=========================================================================
+# Main Execution
+#=========================================================================
+main() {
+    show_banner
+    check_root
+    
+    # Execute installation steps
+    get_system_inputs
+    prepare_packages
+    download_proxmox_iso
+    make_answer_toml
+    make_autoinstall_iso
+    install_proxmox
+    
+    log_info "Waiting for installation to complete..."
+    sleep 5
+    
+    # Boot and configure Proxmox
+    boot_proxmox_with_port_forwarding || {
+        log_error "Failed to boot Proxmox with port forwarding. Exiting."
+        exit 1
+    }
+    
+    # Configure Proxmox
+    configure_proxmox_via_ssh
+    
+    # Finalize installation
+    finalize_installation
 }
 
-# Configure Proxmox via SSH
-configure_proxmox_via_ssh
-
-# Reboot to the main OS
-reboot_to_main_os
+# Execute main function
+main
