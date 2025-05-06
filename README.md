@@ -11,21 +11,12 @@
 
 This project provides an enterprise-ready solution for deploying Proxmox Virtual Environment on Hetzner dedicated servers **without requiring console access**. Our automated installation script handles the complex configuration process, allowing for rapid deployment of production-ready virtualization environments.
 
-### Validated Hardware Platforms
-
-| Server Series | Compatibility | Recommended Models |
-|---------------|---------------|-------------------|
-| AX Series | ✅ Fully Tested | AX-41, AX-51, AX-102 |
-| EX Series | ✅ Compatible | EX-42, EX-52, EX-62 |
-| SX Series | ✅ Compatible | SX-64, SX-128 |
-
-> **Note:** This deployment solution has undergone extensive testing on AX-102 servers with ZFS RAID-1 configuration for optimal reliability and performance.
 
 ## Deployment Process
 
 ### Prerequisites
 
-- A dedicated server from Hetzner (AX, EX, or SX series)
+- A dedicated server from Hetzner
 - Access to Hetzner Robot management interface
 - SSH client
 
