@@ -1,7 +1,7 @@
 # Proxmox on Hetzner: Automated Deployment Solution
 
 <div align="center">
-  <img src="https://github.com/paradosi/proxmox-hetzner/blob/main/files/icons/proxmox.png" alt="Proxmox" height="120" style="margin-right: 40px"/>
+  <img src="https://github.com/paradosi/proxmox-hetzner/blob/main/files/icons/proxmox-logo-stacked-inverted-color.svg" alt="Proxmox" height="120" style="margin-right: 40px"/>
   <br>
   <img src="https://github.com/paradosi/proxmox-hetzner/raw/main/files/icons/hetzner.png" alt="Hetzner" height="50" />
   
