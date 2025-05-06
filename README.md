@@ -1,7 +1,7 @@
 # Proxmox on Hetzner: Automated Deployment Solution
 
 <div align="center">
-  <img src="files/icons/Proxmox-logo-icon.webp" alt="Proxmox" height="64" style="margin-right: 20px"/> <br>
+  <img src="files/icons/Proxmox-logo-icon.webp" alt="Proxmox" height="120" style="margin-right: 40px"/> <br>
   <img src="https://github.com/paradosi/proxmox-hetzner/raw/main/files/icons/hetzner.png" alt="Hetzner" height="50" />
   
   <h3>Enterprise-Grade Proxmox Deployment for Hetzner Dedicated Servers</h3>
