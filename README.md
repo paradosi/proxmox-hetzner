@@ -1,8 +1,8 @@
 # Proxmox on Hetzner Without Console Access
 
 <div align="center">
-  <img src="https://github.com/ariadata/proxmox-hetzner/raw/main/files/icons/proxmox.png" alt="Proxmox" height="64" /> 
-  <img src="https://github.com/ariadata/proxmox-hetzner/raw/main/files/icons/hetzner.png" alt="Hetzner" height="50" />
+  <img src="https://github.com/paradosi/proxmox-hetzner/raw/main/files/icons/proxmox.png" alt="Proxmox" height="64" /> 
+  <img src="https://github.com/paradosi/proxmox-hetzner/raw/main/files/icons/hetzner.png" alt="Hetzner" height="50" />
   <h3>Automated Installation for Hetzner Dedicated Servers</h3>
   
   ![GitHub Stars](https://img.shields.io/github/stars/ariadata/proxmox-hetzner.svg)
