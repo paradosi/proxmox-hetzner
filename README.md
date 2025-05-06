@@ -1,3 +1,5 @@
+<div style="background-color: #f0f0f0; padding: 10px;">
+
 # Proxmox on Hetzner: Automated Deployment Solution
 
 <div align="center">
